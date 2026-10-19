@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Geovisor de calor urbano – Cerro Navia</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+  <link rel="stylesheet" href="estilos.css">
+</head>
+<body>
+
+  <div id="mapa"></div>
+
+  <header id="titulo">
+    <h1>Geovisor de calor urbano</h1>
+    <span>Cerro Navia</span>
+  </header>
+
+  <aside id="panel">
+    <details open>
+      <summary>Lista de capas</summary>
+      <div id="lista-capas">
+        <p class="vacio">Aún no hay capas disponibles.</p>
+      </div>
+    </details>
+  </aside>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script src="mapa.js"></script>
+  <script src="panel.js"></script>
+
+  <!-- agreguen sus funcionalidades!. Cada persona agrega SOLO la suya:
+  <script src="js/temperatura.js"></script>
+  <script src="js/censo.js"></script>
+  <script src="js/calculo-areas.js"></script>
+  -->
+
+</body>
+</html>

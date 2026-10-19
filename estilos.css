@@ -1,0 +1,110 @@
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #1f2933;
+}
+
+#mapa {
+  position: absolute;
+  inset: 0;
+}
+
+#titulo {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1000;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.5rem 1.1rem;
+  border-radius: 999px;
+  background: rgba(20, 24, 33, 0.88);
+  color: #fff;
+}
+
+#titulo h1 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+#titulo span {
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.leaflet-top.leaflet-left {
+  top: 52px;
+}
+
+#panel {
+  position: absolute;
+  top: 62px;
+  left: 64px;
+  z-index: 1000;
+  width: 270px;
+  max-height: calc(100% - 140px);
+  overflow-y: auto;
+  background: #fff;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+#panel summary {
+  padding: 0.6rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  background: #2b2f3a;
+  color: #fff;
+}
+
+#lista-capas {
+  padding: 0.5rem 0.9rem 0.75rem;
+}
+
+.item-capa {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.vacio {
+  margin: 0.4rem 0 0;
+  color: #6b7280;
+  font-size: 0.9rem;
+}
+
+.boton-inicio a {
+  font-size: 1.2rem;
+  line-height: 30px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.coordenadas {
+  padding: 2px 8px;
+  background: rgba(20, 24, 33, 0.8);
+  color: #fff;
+  font-size: 0.75rem;
+  border-radius: 3px;
+}
+
+@media (max-width: 700px) {
+  #titulo span {
+    display: none;
+  }
+
+  #panel {
+    width: calc(100% - 76px);
+    max-height: 40%;
+  }
+}
