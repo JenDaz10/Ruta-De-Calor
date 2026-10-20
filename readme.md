@@ -22,7 +22,7 @@ const capaTemperatura = L.geoJSON(misDatos);
 agregarCapa("Temperatura 16:00", capaTemperatura);
 ```
 ## 📁 Estructura del Proyecto
-
+```
 Ruta_Calor/
 ├── index.html            ← la página principal e integración de scripts
 ├── css/
@@ -34,3 +34,4 @@ Ruta_Calor/
 │   ├── censo.js          ← filtro Censo mayores de 65
 │   ├── superposicion.js  ← superponer capas + activar/desactivar
 │   └── calculo-areas.js  ← superficie de calles expuestas
+```
