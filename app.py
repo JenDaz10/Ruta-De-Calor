@@ -21,7 +21,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Ruta del Calor", page_icon="🔥", layout="wide")
 
-RUTA_LIMITE = Path(__file__).parent / "data" / "pudahuel.geojson"
+RUTA_LIMITE = Path(__file__).parent / "data" / "processed" / "pudahuel.geojson"
 NOMBRE_COMUNA = "pudahuel"
 # Solo se usa si falta el archivo oficial (caja aproximada, NO es el límite real)
 CAJA_FALLBACK = (-70.88, -33.50, -70.68, -33.36)  # minx, miny, maxx, maxy

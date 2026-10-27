@@ -19,7 +19,7 @@ from pathlib import Path
 from shapely.geometry import mapping, shape
 from shapely.ops import transform, unary_union
 
-RAIZ = Path(__file__).parent
+RAIZ = Path(__file__).parent.parent
 CARPETA = RAIZ / "data"
 ENTRADA = CARPETA / "comunas.json"
 SALIDA = CARPETA / "pudahuel.geojson"

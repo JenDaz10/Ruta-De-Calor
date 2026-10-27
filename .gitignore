@@ -1,3 +1,4 @@
 venv/
 **/venv/
 prototipo_streamlit/venv/
+data/raw/
