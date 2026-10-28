@@ -119,11 +119,11 @@ def generar_puntos_calor(_geom, focos, n_por_foco: int = 40, seed: int = 42):
     return puntos
 
 def color_por_temperatura(t: float) -> str:
-    if t >= 40:
-        return "#d7191c"
-    if t >= 38:
-        return "#f46d43"
-    return "#fdae61"
+    if t >= 36:
+        return "#d7191c"  # Crítico / Rojo
+    if t >= 33:
+        return "#f46d43"  # Alto / Naranja
+    return "#fdae61"      # Moderado / Amarillo
 
 
 # ---------------------------------------------------------------- Datos base
@@ -136,26 +136,23 @@ st.sidebar.caption("MVP Sprint 1 · Comuna de Pudahuel")
 st.sidebar.markdown("### Capas")
 
 ver_limite = st.sidebar.checkbox("Límite comunal", value=True)
-ver_puntos = st.sidebar.checkbox("Temperatura 16:00 hrs (puntos)", value=True)
-ver_heat = st.sidebar.checkbox("Mapa de calor (densidad)", value=False)
-ver_mayores = st.sidebar.checkbox("Población > 60 años (Censo)", value=False)
+ver_termico = st.sidebar.checkbox("Islas de Calor (Temperatura LST)", value=True)
+ver_mayores = st.sidebar.checkbox("Demografía / Población > 60 años", value=False)
 
 estilo_base = st.sidebar.selectbox(
     "Mapa base", ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"]
 )
 
-st.sidebar.markdown("### Filtro")
-temp_min = st.sidebar.slider("Temperatura mínima (°C)", 34.0, 42.0, 34.0, 0.5)
+st.sidebar.markdown("### Filtro de Calor")
+temp_min = st.sidebar.slider("Temperatura mínima (°C)", 25.0, 42.0, 28.0, 0.5)
 
 st.sidebar.markdown("---")
 st.sidebar.info(
-    "⚠️ La temperatura mostrada es simulada para la demo. "
-    "Los datos de población corresponden al Censo 2024 (INE) real."
+    "⚠️ Datos actualizados con temperatura satelital real LST (Landsat 8) "
+    "y demografía del Censo 2024 (INE)."
 )
 
 # ---------------------------------------------------------------- Mapa
-puntos = [p for p in generar_puntos_calor(geom, focos) if p["temp"] >= temp_min]
-
 centro = geom.centroid
 mapa = folium.Map(
     location=[centro.y, centro.x],
@@ -187,58 +184,67 @@ if ver_limite:
             tooltip="Caja aproximada (falta el límite oficial)",
         ).add_to(mapa)
 
-if ver_puntos:
-    capa = folium.FeatureGroup(name="Temperatura 16:00")
-    for p in puntos:
-        folium.CircleMarker(
-            location=[p["lat"], p["lon"]],
-            radius=6,
-            color=color_por_temperatura(p["temp"]),
-            fill=True,
-            fill_opacity=0.75,
-            weight=1,
-            tooltip=f"{p['temp']} °C (16:00 hrs, simulado)",
-        ).add_to(capa)
-    capa.add_to(mapa)
+# ---------------------------------------------------------------- Mapa
+# Filtrar las manzanas de forma segura
+if gdf_censo is not None:
+    gdf_filtrado = gdf_censo[gdf_censo["temp_promedio"] >= temp_min]
+else:
+    gdf_filtrado = None
 
-if ver_heat and puntos:
-    HeatMap(
-        [[p["lat"], p["lon"], p["temp"] - 33] for p in puntos],
-        name="Densidad de calor",
-        radius=22,
-        blur=18,
-    ).add_to(mapa)
-
-if ver_mayores and gdf_censo is not None:
-    capa = folium.FeatureGroup(name="Mayores de 60 (Censo 2024)")
-    
-    # Creamos un mapa de coropletas (polígonos coloreados)
+# --- CAPA 1: Islas de Calor (Temperatura Satelital LST) ---
+if ver_termico and gdf_filtrado is not None and not gdf_filtrado.empty:
+    capa_termica = folium.FeatureGroup(name="Islas de Calor (LST)")
     folium.GeoJson(
-        gdf_censo,
-        name="Adultos Mayores",
+        gdf_filtrado,
+        name="Manzanas Térmicas",
         style_function=lambda feature: {
-            "fillColor": "#4575b4" if feature["properties"]["n_edad_60_mas"] > 0 else "transparent",
-            "color": "#4575b4",
-            "weight": 0.5,
-            # La opacidad sube mientras más adultos mayores haya (tope en 0.8)
-            "fillOpacity": min(feature["properties"]["n_edad_60_mas"] / 100, 0.8) 
+            "fillColor": color_por_temperatura(feature["properties"]["temp_promedio"]),
+            "color": "#333333",
+            "weight": 0.3,
+            "fillOpacity": 0.75 
         },
         tooltip=folium.GeoJsonTooltip(
-            fields=["MANZENT", "n_edad_60_mas"],
-            aliases=["Manzana:", "Población > 60 años:"],
+            fields=["MANZENT", "temp_promedio"],
+            aliases=["Manzana:", "Temp. Promedio (°C):"],
             localize=True
         )
-    ).add_to(capa)
-    capa.add_to(mapa)
+    ).add_to(capa_termica)
+    capa_termica.add_to(mapa)
+
+# --- CAPA 2: Demografía / Adultos Mayores (Censo 2024) ---
+if ver_mayores and gdf_censo is not None:
+    capa_censo = folium.FeatureGroup(name="Adultos Mayores (Censo)")
+    folium.GeoJson(
+        gdf_censo,
+        name="Manzanas Censo",
+        style_function=lambda feature: {
+            "fillColor": "#4575b4" if feature.get("properties", {}).get("n_edad_60_mas", 0) > 0 else "transparent",
+            "color": "#2b5c8f",
+            "weight": 0.4,
+            "fillOpacity": 0.6 
+        },
+        tooltip=folium.GeoJsonTooltip(
+            fields=["MANZENT", "n_per", "top_edades"],
+            aliases=["Manzana:", "Población total:", "Mayoría de edad:"],
+            localize=True
+        ),
+        popup=folium.GeoJsonPopup(
+            fields=["html_popup"],
+            labels=False,
+            max_width=300
+        )
+    ).add_to(capa_censo)
+    capa_censo.add_to(mapa)
 leyenda = """
 <div style="position: fixed; bottom: 30px; left: 30px; z-index: 9999;
  background: white; padding: 10px 12px; border: 1px solid #999;
  border-radius: 6px; font-size: 13px; color: #222;">
-<b>Temperatura 16:00</b><br>
-<span style="color:#d7191c">●</span> ≥ 40 °C<br>
-<span style="color:#f46d43">●</span> 38 – 40 °C<br>
-<span style="color:#fdae61">●</span> &lt; 38 °C<br>
-<span style="color:#4575b4">●</span> Población &gt; 60 años
+<b>Temperatura Satelital LST</b><br>
+<span style="color:#d7191c">■</span> ≥ 36 °C (Crítico)<br>
+<span style="color:#f46d43">■</span> 33 – 36 °C (Alto)<br>
+<span style="color:#fdae61">■</span> &lt; 33 °C (Moderado)<br>
+<hr style="margin: 4px 0;">
+<span style="color:#4575b4">■</span> Población &gt; 60 años
 </div>
 """
 mapa.get_root().html.add_child(folium.Element(leyenda))
@@ -250,12 +256,20 @@ st.caption("Islas de calor urbano y vulnerabilidad social · Pudahuel (MVP)")
 st.info("💡 Capa demográfica actualizada con datos reales del Censo 2024.")
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Puntos visibles", len(puntos))
-c2.metric("Temp. máxima", f"{max((p['temp'] for p in puntos), default=0)} °C")
-c3.metric(
-    "Temp. promedio",
-    f"{(sum(p['temp'] for p in puntos) / len(puntos)):.1f} °C" if puntos else "-",
-)
+
+# Calculamos de forma segura solo si el DataFrame tiene datos
+if ver_termico and gdf_filtrado is not None and not gdf_filtrado.empty:
+    n_manzanas_visibles = len(gdf_filtrado)
+    temp_max_val = gdf_filtrado["temp_promedio"].max()
+    temp_prom_val = gdf_filtrado["temp_promedio"].mean()
+else:
+    n_manzanas_visibles = 0
+    temp_max_val = 0.0
+    temp_prom_val = 0.0
+
+c1.metric("Manzanas visibles", n_manzanas_visibles)
+c2.metric("Temp. máxima", f"{temp_max_val:.1f} °C")
+c3.metric("Temp. promedio", f"{temp_prom_val:.1f} °C")
 
 st_folium(mapa, width=None, height=600, returned_objects=[])
 
@@ -269,6 +283,6 @@ with st.expander("Fuente y fecha de los datos"):
         )
     )
     st.write(
-        "**Población:** Datos demográficos reales extraídos de la cartografía de manzanas del Censo 2024 (INE) para mayores de 60 años.\n\n"
-        "**Temperatura:** Datos simulados temporalmente para el Sprint 1. En la siguiente etapa se integrarán fuentes térmicas reales (estaciones o satélite)."
+        "**Población:** Datos demográficos reales extraídos de la cartografía de manzanas del Censo 2024 (INE).\n\n"
+        "**Temperatura:** Datos de Superficie Terrestre (LST) extraídos de imágenes satelitales Landsat 8 de verano a través de Google Earth Engine."
     )
