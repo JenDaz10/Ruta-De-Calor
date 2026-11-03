@@ -28,6 +28,24 @@ NOMBRE_COMUNA = "pudahuel"
 # Solo se usa si falta el archivo oficial (caja aproximada, NO es el límite real)
 CAJA_FALLBACK = (-70.88, -33.50, -70.68, -33.36)  # minx, miny, maxx, maxy
 
+# NUEVO: ruta de los refugios y color de cada categoría.
+# Las categorías deben coincidir con las de scripts/descargar_refugios.py
+RUTA_REFUGIOS = Path(__file__).parent / "data" / "processed" / "pudahuel_refugios.geojson"
+COLORES_REFUGIO = {
+    "Hospital": "#d62728",
+    "Clínica / Cesfam": "#e377c2",
+    "Comisaría / Carabineros": "#1f77b4",
+    "Bomberos": "#ff7f0e",
+    "Colegio": "#9467bd",
+    "Jardín infantil": "#bcbd22",
+    "Educación superior": "#8c564b",
+    "Centro comunitario": "#17becf",
+    "Biblioteca": "#7f7f7f",
+    "Municipalidad": "#393b79",
+    "Parque / plaza": "#2ca02c",
+    "Recinto deportivo": "#006d2c",
+}
+
 
 # ---------------------------------------------------------------- Límite comunal
 @st.cache_data
@@ -79,6 +97,39 @@ def cargar_censo_real():
 # Y llámala en la sección de "Datos base" (cerca de la línea 85):
 gdf_censo = cargar_censo_real()
 
+
+# ---------------------------------------------------------------- Refugios (NUEVO)
+@st.cache_data
+def cargar_refugios():
+    """Lista de puntos de refugio, o None si todavía no se generó el archivo."""
+    if not RUTA_REFUGIOS.exists():
+        return None
+    with open(RUTA_REFUGIOS, encoding="utf-8") as f:
+        return json.load(f)["features"]
+
+
+def agregar_refugios(mapa, features, categorias_visibles):
+    """Dibuja un círculo de color por cada refugio de las categorías elegidas."""
+    for ft in features:
+        p = ft["properties"]
+        if p["categoria"] not in categorias_visibles:
+            continue
+        lon, lat = ft["geometry"]["coordinates"]
+        folium.CircleMarker(
+            location=[lat, lon],
+            radius=6,
+            color="white",
+            weight=1,
+            fill=True,
+            fill_color=COLORES_REFUGIO.get(p["categoria"], "#555555"),
+            fill_opacity=0.95,
+            tooltip=p["nombre"],
+            popup=folium.Popup(
+                f"<b>{p['nombre']}</b><br>{p['categoria']}", max_width=250
+            ),
+        ).add_to(mapa)
+
+
 # ---------------------------------------------------------------- Datos simulados
 def punto_dentro(rng, geom):
     minx, miny, maxx, maxy = geom.bounds
@@ -129,6 +180,7 @@ def color_por_temperatura(t: float) -> str:
 # ---------------------------------------------------------------- Datos base
 geom, geojson_limite, es_oficial = obtener_geometria()
 focos = generar_focos(geom)
+refugios = cargar_refugios()  # NUEVO
 
 # ---------------------------------------------------------------- Panel lateral
 st.sidebar.title("🔥 Ruta del Calor")
@@ -138,6 +190,21 @@ st.sidebar.markdown("### Capas")
 ver_limite = st.sidebar.checkbox("Límite comunal", value=True)
 ver_termico = st.sidebar.checkbox("Islas de Calor (Temperatura LST)", value=True)
 ver_mayores = st.sidebar.checkbox("Demografía / Población > 60 años", value=False)
+
+# NUEVO: casilla y selector de refugios
+ver_refugios = st.sidebar.checkbox("Puntos de refugio", value=True)
+categorias_elegidas = []
+if ver_refugios:
+    if refugios is None:
+        st.sidebar.warning(
+            "Aún no hay datos de refugios. Ejecuta: "
+            "python scripts/descargar_refugios.py"
+        )
+    else:
+        todas_las_categorias = sorted({ft["properties"]["categoria"] for ft in refugios})
+        categorias_elegidas = st.sidebar.multiselect(
+            "Tipos de refugio", todas_las_categorias, default=todas_las_categorias
+        )
 
 estilo_base = st.sidebar.selectbox(
     "Mapa base", ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"]
@@ -235,6 +302,11 @@ if ver_mayores and gdf_censo is not None:
         )
     ).add_to(capa_censo)
     capa_censo.add_to(mapa)
+
+# --- CAPA 3 (NUEVA): Puntos de refugio --- (al final para que queden encima)
+if ver_refugios and refugios is not None and categorias_elegidas:
+    agregar_refugios(mapa, refugios, categorias_elegidas)
+
 leyenda = """
 <div style="position: fixed; bottom: 30px; left: 30px; z-index: 9999;
  background: white; padding: 10px 12px; border: 1px solid #999;
@@ -249,13 +321,29 @@ leyenda = """
 """
 mapa.get_root().html.add_child(folium.Element(leyenda))
 
+# NUEVO: leyenda de refugios (esquina inferior derecha, solo categorías visibles)
+if ver_refugios and categorias_elegidas:
+    filas_leyenda = "".join(
+        f'<span style="color:{COLORES_REFUGIO.get(c, "#555555")}">●</span> {c}<br>'
+        for c in categorias_elegidas
+    )
+    leyenda_refugios = f"""
+<div style="position: fixed; bottom: 30px; right: 30px; z-index: 9999;
+ background: white; padding: 10px 12px; border: 1px solid #999;
+ border-radius: 6px; font-size: 13px; color: #222;
+ max-height: 300px; overflow-y: auto;">
+<b>Puntos de refugio</b><br>{filas_leyenda}
+</div>
+"""
+    mapa.get_root().html.add_child(folium.Element(leyenda_refugios))
+
 # ---------------------------------------------------------------- Página principal
 st.title("Ruta del Calor – Visor territorial")
 st.caption("Islas de calor urbano y vulnerabilidad social · Pudahuel (MVP)")
 
 st.info("💡 Capa demográfica actualizada con datos reales del Censo 2024.")
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)  # NUEVO: de 3 a 4 columnas (se suma la de refugios)
 
 # Calculamos de forma segura solo si el DataFrame tiene datos
 if ver_termico and gdf_filtrado is not None and not gdf_filtrado.empty:
@@ -267,9 +355,18 @@ else:
     temp_max_val = 0.0
     temp_prom_val = 0.0
 
+# NUEVO: cantidad de refugios que se están mostrando
+if ver_refugios and refugios is not None:
+    n_refugios_visibles = sum(
+        1 for ft in refugios if ft["properties"]["categoria"] in categorias_elegidas
+    )
+else:
+    n_refugios_visibles = 0
+
 c1.metric("Manzanas visibles", n_manzanas_visibles)
 c2.metric("Temp. máxima", f"{temp_max_val:.1f} °C")
 c3.metric("Temp. promedio", f"{temp_prom_val:.1f} °C")
+c4.metric("Refugios visibles", n_refugios_visibles)  # NUEVO
 
 st_folium(mapa, width=None, height=600, returned_objects=[])
 
@@ -285,4 +382,8 @@ with st.expander("Fuente y fecha de los datos"):
     st.write(
         "**Población:** Datos demográficos reales extraídos de la cartografía de manzanas del Censo 2024 (INE).\n\n"
         "**Temperatura:** Datos de Superficie Terrestre (LST) extraídos de imágenes satelitales Landsat 8 de verano a través de Google Earth Engine."
+    )
+    # NUEVO
+    st.write(
+        "**Refugios:** OpenStreetMap (colaborativo, puede estar incompleto)."
     )
