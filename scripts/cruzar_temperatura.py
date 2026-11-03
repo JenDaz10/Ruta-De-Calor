@@ -1,5 +1,5 @@
-import geopandas as gpd
 import rasterio
+import geopandas as gpd
 from rasterstats import zonal_stats
 from pathlib import Path
 
