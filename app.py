@@ -6,6 +6,8 @@ Visor territorial con varias comunas a la vez y capas activables.
 - Manzanas con temperatura LST + Censo 2024: data/processed/<comuna>_censo_manzanas.geojson
 - Refugios (OpenStreetMap): data/processed/<comuna>_refugios.geojson
   Si un archivo no existe para una comuna, esa capa no se muestra para ella.
+- Estaciones meteorológicas (RedMeteo): se consultan en vivo por internet
+  (scripts/estaciones_redmeteo.py), no hay archivo de datos.
 
 Al abrir el visor no hay comunas ni capas activas: la persona elige.
 
@@ -14,6 +16,7 @@ Ejecutar:  python -m streamlit run app.py
 import json
 import math
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 import branca.colormap as cm
@@ -25,9 +28,25 @@ from shapely.geometry import shape
 from shapely.ops import unary_union
 from streamlit_folium import st_folium
 
+# Estaciones RedMeteo (módulo del compañero). Si falta el archivo o una
+# librería, la app sigue funcionando y solo se desactiva esa capa.
+try:
+    from scripts.estaciones_redmeteo import (
+        agregar_estaciones,
+        cargar_estaciones,
+        leyenda_estaciones_html,
+    )
+
+    ESTACIONES_DISPONIBLES = True
+except Exception:
+    ESTACIONES_DISPONIBLES = False
+
 st.set_page_config(page_title="Ruta del Calor", page_icon="🔥", layout="wide")
 
 DIR_PROCESSED = Path(__file__).parent / "data" / "processed"
+
+# Margen (en metros) alrededor de las comunas elegidas para buscar estaciones
+ESTACIONES_BUFFER_M = 0
 
 # Comunas disponibles: nombre que se muestra -> prefijo de los archivos
 COMUNAS = {
@@ -246,6 +265,39 @@ if ver_refugios:
         key="cat_" + "_".join(COMUNAS[n] for n in datos),
     )
 
+# Estaciones meteorológicas (RedMeteo): apagada al abrir; necesita comunas elegidas
+ver_estaciones = st.sidebar.checkbox(
+    "Estaciones meteorológicas (RedMeteo)",
+    value=False,
+    disabled=not (hay_comunas and ESTACIONES_DISPONIBLES),
+    help="Temperatura del aire medida por estaciones aficionadas (datos no oficiales). "
+    "Elige primero una o más comunas.",
+)
+ver_estaciones = ver_estaciones and hay_comunas and ESTACIONES_DISPONIBLES
+if not ESTACIONES_DISPONIBLES:
+    st.sidebar.caption(
+        "Estaciones no disponibles: falta scripts/estaciones_redmeteo.py o una librería."
+    )
+
+max_horas_est = 3
+estaciones = None
+if ver_estaciones:
+    max_horas_est = st.sidebar.slider("Antigüedad máxima del dato (horas)", 1, 24, 3)
+    geom_estaciones = unary_union([d["geom"] for d in datos.values()])
+    try:
+        estaciones = cargar_estaciones(
+            geom_estaciones, buffer_m=ESTACIONES_BUFFER_M, max_horas=max_horas_est
+        )
+    except Exception:
+        estaciones = None
+    if estaciones is None:
+        st.sidebar.warning("No se pudo conectar con RedMeteo. Intenta más tarde.")
+    elif not estaciones:
+        st.sidebar.info(
+            "Sin estaciones con datos recientes en las comunas elegidas "
+            f"(+{ESTACIONES_BUFFER_M // 1000} km)."
+        )
+
 # Avisos de datos faltantes
 for nombre, d in datos.items():
     faltan = []
@@ -379,9 +431,15 @@ if ver_mayores:
     ).add_to(capa_censo)
     capa_censo.add_to(mapa)
 
-# --- CAPA 3: Puntos de refugio (al final para que queden encima) ---
+# --- CAPA 3: Puntos de refugio (encima de las capas de polígonos) ---
 if ver_refugios and categorias_elegidas:
     agregar_refugios(mapa, refugios, categorias_elegidas)
+
+# --- CAPA 4: Estaciones meteorológicas RedMeteo (al final, quedan encima de todo) ---
+if ver_estaciones and estaciones is not None:
+    if estaciones:
+        agregar_estaciones(mapa, estaciones)
+    mapa.get_root().html.add_child(folium.Element(leyenda_estaciones_html()))
 
 # --- Leyenda de temperatura / población (solo de las capas activas) ---
 partes_leyenda = []
@@ -482,6 +540,13 @@ with st.expander("Fuente y fecha de los datos"):
         "**Población:** datos demográficos reales extraídos de la cartografía de manzanas "
         "del Censo 2024 (INE).\n\n"
         "**Temperatura:** Superficie Terrestre (LST) extraída de imágenes satelitales "
-        "Landsat 8 de verano a través de Google Earth Engine."
+        "Landsat 8 de verano a través de Google Earth Engine. Es temperatura de la "
+        "superficie (no del aire) a la hora de paso del satélite (media mañana)."
     )
     st.write("**Refugios:** OpenStreetMap (colaborativo, puede estar incompleto).")
+    st.write(
+        "**Estaciones meteorológicas:** Red Meteorológica Aficionada de Chile. (2019). "
+        "Sitio web RedMeteo. Red Ciudadana De Estaciones Meteorológicas. "
+        f"Consultado {datetime.now():%d-%m-%Y}, desde https://www.redmeteo.cl/. "
+        "Datos no oficiales. Es temperatura del aire, medida en vivo."
+    )
