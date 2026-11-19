@@ -1,36 +1,42 @@
 """
 Ruta del Calor - MVP Sprint 1 (prototipo Streamlit + Folium)
-Visor centrado en la comuna de Pudahuel con capas activables.
+Visor territorial con varias comunas a la vez y capas activables.
 
-- Límite comunal: archivo OFICIAL en  data/pudahuel.geojson  (ver instrucciones).
-- Temperatura y población > 65 años: datos SIMULADOS (demo), generados
-  siempre DENTRO del límite de la comuna.
+- Límite comunal: data/processed/<comuna>.geojson (WGS84).
+- Manzanas con temperatura LST + Censo 2024: data/processed/<comuna>_censo_manzanas.geojson
+- Refugios (OpenStreetMap): data/processed/<comuna>_refugios.geojson
+  Si un archivo no existe para una comuna, esa capa no se muestra para ella.
+
+Al abrir el visor no hay comunas ni capas activas: la persona elige.
 
 Ejecutar:  python -m streamlit run app.py
 """
 import json
-import random
+import math
+import unicodedata
 from pathlib import Path
 
+import branca.colormap as cm
 import folium
+import geopandas as gpd
+import pandas as pd
 import streamlit as st
-from folium.plugins import HeatMap
-from shapely.geometry import Point, box, shape
+from shapely.geometry import shape
 from shapely.ops import unary_union
 from streamlit_folium import st_folium
 
-import geopandas as gpd
-
 st.set_page_config(page_title="Ruta del Calor", page_icon="🔥", layout="wide")
 
-RUTA_LIMITE = Path(__file__).parent / "data" / "processed" / "pudahuel.geojson"
-NOMBRE_COMUNA = "pudahuel"
-# Solo se usa si falta el archivo oficial (caja aproximada, NO es el límite real)
-CAJA_FALLBACK = (-70.88, -33.50, -70.68, -33.36)  # minx, miny, maxx, maxy
+DIR_PROCESSED = Path(__file__).parent / "data" / "processed"
 
-# NUEVO: ruta de los refugios y color de cada categoría.
-# Las categorías deben coincidir con las de scripts/descargar_refugios.py
-RUTA_REFUGIOS = Path(__file__).parent / "data" / "processed" / "pudahuel_refugios.geojson"
+# Comunas disponibles: nombre que se muestra -> prefijo de los archivos
+COMUNAS = {
+    "Pudahuel": "pudahuel",
+    "Cerro Navia": "cerro_navia",
+    "Cerrillos": "cerrillos",
+    "Renca": "renca",
+}
+
 COLORES_REFUGIO = {
     "Hospital": "#d62728",
     "Clínica / Cesfam": "#e377c2",
@@ -47,18 +53,32 @@ COLORES_REFUGIO = {
 }
 
 
-# ---------------------------------------------------------------- Límite comunal
+def ruta_datos(slug: str, sufijo: str = "") -> Path:
+    """data/processed/<slug>.geojson  o  data/processed/<slug>_<sufijo>.geojson"""
+    nombre = f"{slug}_{sufijo}.geojson" if sufijo else f"{slug}.geojson"
+    return DIR_PROCESSED / nombre
+
+
+def normalizar(texto: str) -> str:
+    """Minúsculas y sin tildes, para comparar nombres de comuna."""
+    sin_tildes = unicodedata.normalize("NFD", str(texto))
+    sin_tildes = "".join(c for c in sin_tildes if unicodedata.category(c) != "Mn")
+    return sin_tildes.lower()
+
+
+# ---------------------------------------------------------------- Carga de datos
 @st.cache_data
-def cargar_limite(ruta: str):
-    """Lee el GeoJSON y se queda con Pudahuel (acepta archivo de todo Chile)."""
+def cargar_limite(ruta: str, nombre_comuna: str):
+    """Lee el GeoJSON y se queda con la comuna pedida (acepta archivo con varias comunas)."""
     with open(ruta, encoding="utf-8") as f:
         data = json.load(f)
     feats = data["features"] if data.get("type") == "FeatureCollection" else [data]
+    buscado = normalizar(nombre_comuna)
     elegidas = []
     for ft in feats:
         props = ft.get("properties") or {}
-        texto = " ".join(str(v) for v in props.values()).lower()
-        if NOMBRE_COMUNA in texto:
+        texto = normalizar(" ".join(str(v) for v in props.values()))
+        if buscado in texto:
             elegidas.append(ft)
     if not elegidas and len(feats) == 1:
         elegidas = feats  # archivo ya filtrado y sin atributos
@@ -67,45 +87,54 @@ def cargar_limite(ruta: str):
     return {"type": "FeatureCollection", "features": elegidas}
 
 
-def obtener_geometria():
-    """Devuelve (geometria, geojson_dict | None, es_oficial)."""
-    if RUTA_LIMITE.exists():
-        fc = cargar_limite(str(RUTA_LIMITE))
-        if fc is None:
-            st.error(
-                "El archivo data/pudahuel.geojson no contiene la comuna de Pudahuel."
-            )
-            st.stop()
-        geom = unary_union([shape(f["geometry"]) for f in fc["features"]])
-        minx, miny, maxx, maxy = geom.bounds
-        if max(abs(minx), abs(maxx)) > 180 or max(abs(miny), abs(maxy)) > 90:
-            st.error(
-                "El GeoJSON está en coordenadas proyectadas (UTM). "
-                "Expórtalo de nuevo en WGS84 (lat/lon). Ver instrucciones."
-            )
-            st.stop()
-        return geom, fc, True
-    return box(*CAJA_FALLBACK), None, False
-
-@st.cache_data
-def cargar_censo_real():
-    ruta = Path(__file__).parent / "data" / "processed" / "pudahuel_censo_manzanas.geojson"
-    if ruta.exists():
-        return gpd.read_file(ruta)
-    return None
-
-# Y llámala en la sección de "Datos base" (cerca de la línea 85):
-gdf_censo = cargar_censo_real()
-
-
-# ---------------------------------------------------------------- Refugios (NUEVO)
-@st.cache_data
-def cargar_refugios():
-    """Lista de puntos de refugio, o None si todavía no se generó el archivo."""
-    if not RUTA_REFUGIOS.exists():
+def geometria_limite(nombre: str):
+    """Devuelve (geometria, geojson_dict) del límite de una comuna, o None si no se puede."""
+    ruta = ruta_datos(COMUNAS[nombre])
+    if not ruta.exists():
         return None
-    with open(RUTA_REFUGIOS, encoding="utf-8") as f:
+    fc = cargar_limite(str(ruta), nombre)
+    if fc is None:
+        return None
+    geom = unary_union([shape(f["geometry"]) for f in fc["features"]])
+    minx, miny, maxx, maxy = geom.bounds
+    if max(abs(minx), abs(maxx)) > 180 or max(abs(miny), abs(maxy)) > 90:
+        return None  # coordenadas proyectadas (UTM), no sirven
+    return geom, fc
+
+
+@st.cache_data
+def cargar_censo_real(ruta: str):
+    gdf = gpd.read_file(ruta)
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326")
+    else:
+        gdf = gdf.to_crs("EPSG:4326")
+    return gdf
+
+
+@st.cache_data
+def cargar_refugios(ruta: str):
+    """Lista de puntos de refugio."""
+    with open(ruta, encoding="utf-8") as f:
         return json.load(f)["features"]
+
+
+def datos_comuna(nombre: str):
+    """Todos los datos disponibles de una comuna (None en lo que falte)."""
+    limite = geometria_limite(nombre)
+    if limite is None:
+        return None
+    geom, fc = limite
+    slug = COMUNAS[nombre]
+    ruta_censo = ruta_datos(slug, "censo_manzanas")
+    ruta_ref = ruta_datos(slug, "refugios")
+    return {
+        "nombre": nombre,
+        "geom": geom,
+        "fc": fc,
+        "censo": cargar_censo_real(str(ruta_censo)) if ruta_censo.exists() else None,
+        "refugios": cargar_refugios(str(ruta_ref)) if ruta_ref.exists() else None,
+    }
 
 
 def agregar_refugios(mapa, features, categorias_visibles):
@@ -130,45 +159,6 @@ def agregar_refugios(mapa, features, categorias_visibles):
         ).add_to(mapa)
 
 
-# ---------------------------------------------------------------- Datos simulados
-def punto_dentro(rng, geom):
-    minx, miny, maxx, maxy = geom.bounds
-    while True:
-        p = Point(rng.uniform(minx, maxx), rng.uniform(miny, maxy))
-        if geom.contains(p):
-            return p
-
-
-@st.cache_data
-def generar_focos(_geom, n_focos: int = 5, seed: int = 3):
-    rng = random.Random(seed)
-    focos = []
-    for _ in range(n_focos):
-        p = punto_dentro(rng, _geom)
-        focos.append((p.y, p.x))
-    return focos
-
-
-@st.cache_data
-def generar_puntos_calor(_geom, focos, n_por_foco: int = 40, seed: int = 42):
-    """Temperatura simulada (°C) a las 16:00 hrs, solo dentro de la comuna."""
-    rng = random.Random(seed)
-    minx, miny, maxx, maxy = _geom.bounds
-    sigma = 0.05 * max(maxx - minx, maxy - miny)
-    puntos = []
-    for lat0, lon0 in focos:
-        creados, intentos = 0, 0
-        while creados < n_por_foco and intentos < n_por_foco * 30:
-            intentos += 1
-            lat, lon = rng.gauss(lat0, sigma), rng.gauss(lon0, sigma)
-            if not _geom.contains(Point(lon, lat)):
-                continue
-            dist = ((lat - lat0) ** 2 + (lon - lon0) ** 2) ** 0.5
-            temp = round(41 - (dist / (2 * sigma)) * 6 + rng.uniform(-1, 1), 1)
-            puntos.append({"lat": lat, "lon": lon, "temp": temp})
-            creados += 1
-    return puntos
-
 def color_por_temperatura(t: float) -> str:
     if t >= 36:
         return "#d7191c"  # Crítico / Rojo
@@ -177,151 +167,248 @@ def color_por_temperatura(t: float) -> str:
     return "#fdae61"      # Moderado / Amarillo
 
 
-# ---------------------------------------------------------------- Datos base
-geom, geojson_limite, es_oficial = obtener_geometria()
-focos = generar_focos(geom)
-refugios = cargar_refugios()  # NUEVO
-
-# ---------------------------------------------------------------- Panel lateral
+# ---------------------------------------------------------------- Panel lateral (parte 1)
 st.sidebar.title("🔥 Ruta del Calor")
-st.sidebar.caption("MVP Sprint 1 · Comuna de Pudahuel")
+st.sidebar.caption("MVP Sprint 1 · Pudahuel, Cerro Navia, Cerrillos y Renca")
+
+elegidas = st.sidebar.multiselect(
+    "Comunas",
+    list(COMUNAS.keys()),
+    default=[],
+    help="Puedes elegir una o varias comunas a la vez.",
+)
+
+# ---------------------------------------------------------------- Datos de las comunas elegidas
+datos = {}
+for nombre in elegidas:
+    d = datos_comuna(nombre)
+    if d is None:
+        st.sidebar.error(f"No pude cargar el límite comunal de {nombre}.")
+    else:
+        datos[nombre] = d
+
+# Se juntan los datos de todas las comunas elegidas en una sola tabla / lista
+censos = []
+refugios = []
+for d in datos.values():
+    if d["censo"] is not None:
+        g = d["censo"].copy()
+        g["comuna"] = d["nombre"]
+        censos.append(g)
+    if d["refugios"]:
+        refugios.extend(d["refugios"])
+
+gdf_censo = (
+    gpd.GeoDataFrame(
+        pd.concat(censos, ignore_index=True), geometry="geometry", crs="EPSG:4326"
+    )
+    if censos
+    else None
+)
+tiene_censo = gdf_censo is not None
+tiene_refugios = len(refugios) > 0
+hay_comunas = len(datos) > 0
+
+# ---------------------------------------------------------------- Panel lateral (parte 2)
 st.sidebar.markdown("### Capas")
 
+# Las capas de datos arrancan apagadas; solo se bloquean si hay comunas elegidas sin esos datos
 ver_limite = st.sidebar.checkbox("Límite comunal", value=True)
-ver_termico = st.sidebar.checkbox("Islas de Calor (Temperatura LST)", value=True)
-ver_mayores = st.sidebar.checkbox("Demografía / Población > 60 años", value=False)
+ver_termico = st.sidebar.checkbox(
+    "Islas de Calor (Temperatura LST)",
+    value=False,
+    disabled=hay_comunas and not tiene_censo,
+)
+ver_mayores = st.sidebar.checkbox(
+    "Demografía / Población > 60 años",
+    value=False,
+    disabled=hay_comunas and not tiene_censo,
+)
+ver_refugios = st.sidebar.checkbox(
+    "Puntos de refugio",
+    value=False,
+    disabled=hay_comunas and not tiene_refugios,
+)
 
-# NUEVO: casilla y selector de refugios
-ver_refugios = st.sidebar.checkbox("Puntos de refugio", value=True)
+# Por seguridad: ninguna capa de datos se activa si no hay archivos para lo elegido
+ver_termico = ver_termico and tiene_censo
+ver_mayores = ver_mayores and tiene_censo
+ver_refugios = ver_refugios and tiene_refugios
+
+# Tipos de refugio: al activar la capa salen todos (sin filtro); la persona puede quitar
 categorias_elegidas = []
 if ver_refugios:
-    if refugios is None:
-        st.sidebar.warning(
-            "Aún no hay datos de refugios. Ejecuta: "
-            "python scripts/descargar_refugios.py"
-        )
-    else:
-        todas_las_categorias = sorted({ft["properties"]["categoria"] for ft in refugios})
-        categorias_elegidas = st.sidebar.multiselect(
-            "Tipos de refugio", todas_las_categorias, default=todas_las_categorias
-        )
+    todas_las_categorias = sorted({ft["properties"]["categoria"] for ft in refugios})
+    categorias_elegidas = st.sidebar.multiselect(
+        "Tipos de refugio",
+        todas_las_categorias,
+        default=todas_las_categorias,
+        key="cat_" + "_".join(COMUNAS[n] for n in datos),
+    )
+
+# Avisos de datos faltantes
+for nombre, d in datos.items():
+    faltan = []
+    if d["censo"] is None:
+        faltan.append("temperatura y demografía")
+    if d["refugios"] is None:
+        faltan.append("refugios")
+    if faltan:
+        st.sidebar.warning(f"{nombre}: todavía no hay datos de {' ni de '.join(faltan)}.")
 
 estilo_base = st.sidebar.selectbox(
     "Mapa base", ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"]
 )
 
+# Filtro de calor: arranca en el mínimo de los datos, o sea, sin filtrar nada
 st.sidebar.markdown("### Filtro de Calor")
-temp_min = st.sidebar.slider("Temperatura mínima (°C)", 25.0, 42.0, 28.0, 0.5)
-
-st.sidebar.markdown("---")
-st.sidebar.info(
-    "⚠️ Datos actualizados con temperatura satelital real LST (Landsat 8) "
-    "y demografía del Censo 2024 (INE)."
+if tiene_censo:
+    t_validas = gdf_censo.loc[gdf_censo["temp_promedio"] > 0, "temp_promedio"]
+    t_lo = float(math.floor(t_validas.min())) if not t_validas.empty else 25.0
+    t_hi = float(math.ceil(t_validas.max())) if not t_validas.empty else 42.0
+    if t_hi <= t_lo:
+        t_hi = t_lo + 1.0
+else:
+    t_lo, t_hi = 25.0, 42.0
+temp_min = st.sidebar.slider(
+    "Temperatura mínima (°C)",
+    min_value=t_lo,
+    max_value=t_hi,
+    value=t_lo,
+    step=0.5,
+    disabled=not ver_termico,
 )
 
+if tiene_censo:
+    st.sidebar.markdown("---")
+    st.sidebar.info(
+        "⚠️ Datos actualizados con temperatura satelital real LST (Landsat 8) "
+        "y demografía del Censo 2024 (INE)."
+    )
+
 # ---------------------------------------------------------------- Mapa
-centro = geom.centroid
+# Encuadre: las comunas elegidas o, si no hay ninguna, las cuatro juntas
+if hay_comunas:
+    geom_vista = unary_union([d["geom"] for d in datos.values()])
+else:
+    geoms = []
+    for nombre in COMUNAS:
+        limite = geometria_limite(nombre)
+        if limite is not None:
+            geoms.append(limite[0])
+    if not geoms:
+        st.error("No encontré ningún límite comunal en data/processed.")
+        st.stop()
+    geom_vista = unary_union(geoms)
+
+centro = geom_vista.centroid
 mapa = folium.Map(
     location=[centro.y, centro.x],
     zoom_start=12,
     tiles=estilo_base,
     control_scale=True,
 )
-minx, miny, maxx, maxy = geom.bounds
+minx, miny, maxx, maxy = geom_vista.bounds
 mapa.fit_bounds([[miny, minx], [maxy, maxx]])
 
 if ver_limite:
-    if geojson_limite is not None:
+    for d in datos.values():
         folium.GeoJson(
-            geojson_limite,
-            name="Límite comunal",
+            d["fc"],
+            name=f"Límite {d['nombre']}",
             style_function=lambda _: {
                 "color": "#222222",
                 "weight": 3,
                 "fillOpacity": 0.03,
             },
-            tooltip="Comuna de Pudahuel",
+            tooltip=f"Comuna de {d['nombre']}",
         ).add_to(mapa)
-    else:
-        folium.Rectangle(
-            bounds=[[miny, minx], [maxy, maxx]],
-            color="#888888",
-            weight=2,
-            dash_array="6",
-            tooltip="Caja aproximada (falta el límite oficial)",
-        ).add_to(mapa)
-
-# ---------------------------------------------------------------- Mapa
-# Filtrar las manzanas de forma segura
-if gdf_censo is not None:
-    gdf_filtrado = gdf_censo[gdf_censo["temp_promedio"] >= temp_min]
-else:
-    gdf_filtrado = None
 
 # --- CAPA 1: Islas de Calor (Temperatura Satelital LST) ---
-if ver_termico and gdf_filtrado is not None and not gdf_filtrado.empty:
-    capa_termica = folium.FeatureGroup(name="Islas de Calor (LST)")
-    folium.GeoJson(
-        gdf_filtrado,
-        name="Manzanas Térmicas",
-        style_function=lambda feature: {
-            "fillColor": color_por_temperatura(feature["properties"]["temp_promedio"]),
-            "color": "#333333",
-            "weight": 0.3,
-            "fillOpacity": 0.75 
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["MANZENT", "temp_promedio"],
-            aliases=["Manzana:", "Temp. Promedio (°C):"],
-            localize=True
-        )
-    ).add_to(capa_termica)
-    capa_termica.add_to(mapa)
+gdf_filtrado = None
+if ver_termico:
+    gdf_filtrado = gdf_censo[gdf_censo["temp_promedio"] >= temp_min]
+    if not gdf_filtrado.empty:
+        capa_termica = folium.FeatureGroup(name="Islas de Calor (LST)")
+        folium.GeoJson(
+            gdf_filtrado[["comuna", "MANZENT", "temp_promedio", "geometry"]],
+            name="Manzanas Térmicas",
+            style_function=lambda feature: {
+                "fillColor": color_por_temperatura(feature["properties"]["temp_promedio"]),
+                "color": "#333333",
+                "weight": 0.3,
+                "fillOpacity": 0.75,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["comuna", "MANZENT", "temp_promedio"],
+                aliases=["Comuna:", "Manzana:", "Temp. Promedio (°C):"],
+                localize=True,
+            ),
+        ).add_to(capa_termica)
+        capa_termica.add_to(mapa)
 
-# --- CAPA 2: Demografía / Adultos Mayores (Censo 2024) ---
-if ver_mayores and gdf_censo is not None:
+# --- CAPA 2: Demografía / Adultos Mayores (Censo 2024), color según cantidad ---
+if ver_mayores:
+    valores = gdf_censo["n_edad_60_mas"].fillna(0)
+    positivos = valores[valores > 0]
+    # Tope en el percentil 95 para que unas pocas manzanas extremas no aplasten la escala
+    tope = max(float(positivos.quantile(0.95)), 2.0) if not positivos.empty else 2.0
+    escala = cm.LinearColormap(["#deebf7", "#6baed6", "#08306b"], vmin=1, vmax=tope)
+
+    def estilo_censo(feature):
+        n = feature["properties"].get("n_edad_60_mas") or 0
+        if n <= 0:
+            return {"fillColor": "transparent", "color": "#2b5c8f",
+                    "weight": 0.4, "fillOpacity": 0}
+        return {"fillColor": escala(min(n, tope)), "color": "#2b5c8f",
+                "weight": 0.4, "fillOpacity": 0.75}
+
     capa_censo = folium.FeatureGroup(name="Adultos Mayores (Censo)")
     folium.GeoJson(
-        gdf_censo,
+        gdf_censo[["comuna", "MANZENT", "n_per", "n_edad_60_mas",
+                   "top_edades", "html_popup", "geometry"]],
         name="Manzanas Censo",
-        style_function=lambda feature: {
-            "fillColor": "#4575b4" if feature.get("properties", {}).get("n_edad_60_mas", 0) > 0 else "transparent",
-            "color": "#2b5c8f",
-            "weight": 0.4,
-            "fillOpacity": 0.6 
-        },
+        style_function=estilo_censo,
         tooltip=folium.GeoJsonTooltip(
-            fields=["MANZENT", "n_per", "top_edades"],
-            aliases=["Manzana:", "Población total:", "Mayoría de edad:"],
-            localize=True
+            fields=["comuna", "MANZENT", "n_per", "n_edad_60_mas", "top_edades"],
+            aliases=["Comuna:", "Manzana:", "Población total:",
+                     "Personas 60+:", "Mayoría de edad:"],
+            localize=True,
         ),
-        popup=folium.GeoJsonPopup(
-            fields=["html_popup"],
-            labels=False,
-            max_width=300
-        )
+        popup=folium.GeoJsonPopup(fields=["html_popup"], labels=False, max_width=300),
     ).add_to(capa_censo)
     capa_censo.add_to(mapa)
 
-# --- CAPA 3 (NUEVA): Puntos de refugio --- (al final para que queden encima)
-if ver_refugios and refugios is not None and categorias_elegidas:
+# --- CAPA 3: Puntos de refugio (al final para que queden encima) ---
+if ver_refugios and categorias_elegidas:
     agregar_refugios(mapa, refugios, categorias_elegidas)
 
-leyenda = """
-<div style="position: fixed; bottom: 30px; left: 30px; z-index: 9999;
- background: white; padding: 10px 12px; border: 1px solid #999;
- border-radius: 6px; font-size: 13px; color: #222;">
-<b>Temperatura Satelital LST</b><br>
-<span style="color:#d7191c">■</span> ≥ 36 °C (Crítico)<br>
-<span style="color:#f46d43">■</span> 33 – 36 °C (Alto)<br>
-<span style="color:#fdae61">■</span> &lt; 33 °C (Moderado)<br>
-<hr style="margin: 4px 0;">
-<span style="color:#4575b4">■</span> Población &gt; 60 años
-</div>
-"""
-mapa.get_root().html.add_child(folium.Element(leyenda))
+# --- Leyenda de temperatura / población (solo de las capas activas) ---
+partes_leyenda = []
+if ver_termico:
+    partes_leyenda.append(
+        "<b>Temperatura Satelital LST</b><br>"
+        '<span style="color:#d7191c">■</span> ≥ 36 °C (Crítico)<br>'
+        '<span style="color:#f46d43">■</span> 33 – 36 °C (Alto)<br>'
+        '<span style="color:#fdae61">■</span> &lt; 33 °C (Moderado)'
+    )
+if ver_mayores:
+    partes_leyenda.append(
+        "<b>Población &gt; 60 años</b> (por manzana)<br>"
+        '<div style="width:140px;height:10px;background:linear-gradient(to right,#deebf7,#6baed6,#08306b);"></div>'
+        '<div style="display:flex;justify-content:space-between;width:140px;font-size:11px;"><span>pocas</span><span>muchas</span></div>'
+    )
+if partes_leyenda:
+    leyenda = (
+        '<div style="position: fixed; bottom: 30px; left: 30px; z-index: 9999; '
+        "background: white; padding: 10px 12px; border: 1px solid #999; "
+        'border-radius: 6px; font-size: 13px; color: #222;">'
+        + '<hr style="margin: 4px 0;">'.join(partes_leyenda)
+        + "</div>"
+    )
+    mapa.get_root().html.add_child(folium.Element(leyenda))
 
-# NUEVO: leyenda de refugios (esquina inferior derecha, solo categorías visibles)
+# --- Leyenda de refugios (esquina inferior derecha, solo categorías visibles) ---
 if ver_refugios and categorias_elegidas:
     filas_leyenda = "".join(
         f'<span style="color:{COLORES_REFUGIO.get(c, "#555555")}">●</span> {c}<br>'
@@ -337,53 +424,64 @@ if ver_refugios and categorias_elegidas:
 """
     mapa.get_root().html.add_child(folium.Element(leyenda_refugios))
 
+# Quitar el borde negro de foco al hacer clic en polígonos
+estilo_sin_borde = """
+<style>
+.leaflet-interactive:focus,
+.leaflet-container path:focus,
+.leaflet-container svg:focus {
+    outline: none !important;
+}
+</style>
+"""
+mapa.get_root().header.add_child(folium.Element(estilo_sin_borde))
+
 # ---------------------------------------------------------------- Página principal
 st.title("Ruta del Calor – Visor territorial")
-st.caption("Islas de calor urbano y vulnerabilidad social · Pudahuel (MVP)")
+st.caption(
+    "Islas de calor urbano y vulnerabilidad social · "
+    + (", ".join(datos) if hay_comunas else "Pudahuel, Cerro Navia, Cerrillos y Renca")
+    + " (MVP)"
+)
 
-st.info("💡 Capa demográfica actualizada con datos reales del Censo 2024.")
+if not hay_comunas:
+    st.info(
+        "👈 Elige una o más comunas en el panel izquierdo y luego activa "
+        "las capas que quieras ver."
+    )
 
-c1, c2, c3, c4 = st.columns(4)  # NUEVO: de 3 a 4 columnas (se suma la de refugios)
+c1, c2, c3, c4 = st.columns(4)
 
-# Calculamos de forma segura solo si el DataFrame tiene datos
 if ver_termico and gdf_filtrado is not None and not gdf_filtrado.empty:
     n_manzanas_visibles = len(gdf_filtrado)
-    temp_max_val = gdf_filtrado["temp_promedio"].max()
-    temp_prom_val = gdf_filtrado["temp_promedio"].mean()
+    temp_max_val = f"{gdf_filtrado['temp_promedio'].max():.1f} °C"
+    temp_prom_val = f"{gdf_filtrado['temp_promedio'].mean():.1f} °C"
+elif ver_termico:
+    n_manzanas_visibles, temp_max_val, temp_prom_val = 0, "—", "—"
 else:
-    n_manzanas_visibles = 0
-    temp_max_val = 0.0
-    temp_prom_val = 0.0
+    n_manzanas_visibles, temp_max_val, temp_prom_val = "—", "—", "—"
 
-# NUEVO: cantidad de refugios que se están mostrando
-if ver_refugios and refugios is not None:
+if ver_refugios:
     n_refugios_visibles = sum(
         1 for ft in refugios if ft["properties"]["categoria"] in categorias_elegidas
     )
 else:
-    n_refugios_visibles = 0
+    n_refugios_visibles = "—"
 
 c1.metric("Manzanas visibles", n_manzanas_visibles)
-c2.metric("Temp. máxima", f"{temp_max_val:.1f} °C")
-c3.metric("Temp. promedio", f"{temp_prom_val:.1f} °C")
-c4.metric("Refugios visibles", n_refugios_visibles)  # NUEVO
+c2.metric("Temp. máxima", temp_max_val)
+c3.metric("Temp. promedio", temp_prom_val)
+c4.metric("Refugios visibles", n_refugios_visibles)
 
-st_folium(mapa, width=None, height=600, returned_objects=[])
+clave_mapa = "mapa_" + ("_".join(COMUNAS[n] for n in datos) if hay_comunas else "todas")
+st_folium(mapa, width=None, height=600, returned_objects=[], key=clave_mapa)
 
 with st.expander("Fuente y fecha de los datos"):
+    st.write("**Límite comunal:** archivo oficial (División Político Administrativa, BCN).")
     st.write(
-        "**Límite comunal:** "
-        + (
-            "archivo oficial (División Político Administrativa)."
-            if es_oficial
-            else "pendiente (caja aproximada)."
-        )
+        "**Población:** datos demográficos reales extraídos de la cartografía de manzanas "
+        "del Censo 2024 (INE).\n\n"
+        "**Temperatura:** Superficie Terrestre (LST) extraída de imágenes satelitales "
+        "Landsat 8 de verano a través de Google Earth Engine."
     )
-    st.write(
-        "**Población:** Datos demográficos reales extraídos de la cartografía de manzanas del Censo 2024 (INE).\n\n"
-        "**Temperatura:** Datos de Superficie Terrestre (LST) extraídos de imágenes satelitales Landsat 8 de verano a través de Google Earth Engine."
-    )
-    # NUEVO
-    st.write(
-        "**Refugios:** OpenStreetMap (colaborativo, puede estar incompleto)."
-    )
+    st.write("**Refugios:** OpenStreetMap (colaborativo, puede estar incompleto).")
