@@ -1,7 +1,19 @@
+# --- Para ejecutar el visor (app.py) ---
 streamlit>=1.35
 folium>=0.16
+branca>=0.7
 streamlit-folium>=0.20
 shapely>=2.0
 pandas>=2.0
 geopandas>=0.14
 pyarrow>=14.0
+requests>=2.31
+tzdata
+
+# --- Solo para procesar datos nuevos (scripts/procesar_comuna.py) ---
+# Si solo vas a mirar el visor, NO las necesitas. Para procesar, quita el "#" y
+# vuelve a ejecutar:  pip install -r requirements.txt
+# rasterstats>=0.19
+# rasterio>=1.3
+# earthengine-api>=0.1.380
+# geemap>=0.30
